@@ -35,7 +35,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from custom_components.eufy_home_security.const import DOMAIN
+from custom_components.eufy_home_security import runtime
+from custom_components.eufy_home_security.const import AUTO_STREAM_ON_MOTION_KEY, DOMAIN
 
 # Inverted: wire 0 is on (ECB).
 _END_EARLY: Final = "motion_stop_end_early"
@@ -277,6 +278,41 @@ async def test_a_shared_bit_switch_keeps_the_other_bits_of_its_parameter(
     await hass.async_block_till_done()
     assert fake_station.received[-1]["payload"] == {"arm_push_mode": 208}
     assert state_of(hass, entity_id) == STATE_OFF
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+async def test_auto_stream_on_motion_switch_toggles_stream_manager_flag(
+    hass: HomeAssistant,
+    fake_station: FakeStation,
+    built_clients: list[EufySecurity],
+    seed_warm_cache: Callable[..., None],
+) -> None:
+    """Each streamable camera gets an auto-stream-on-motion switch that defaults to off."""
+    del fake_station, built_clients
+    entry = await set_up_warm(hass, seed_warm_cache)
+    entity_id = _switch_id(hass, AUTO_STREAM_ON_MOTION_KEY)
+    assert state_of(hass, entity_id) == STATE_OFF
+
+    streams = runtime.streaming(entry)
+    assert streams is not None
+    assert streams.auto_stream_on_motion(SYNTHETIC.camera_sn) is False
+
+    registered = er.async_get(hass).async_get(entity_id)
+    assert registered is not None
+    assert registered.entity_category is EntityCategory.CONFIG
+    assert registered.translation_key == AUTO_STREAM_ON_MOTION_KEY
+
+    await set_switch(hass, entity_id, True)
+    await hass.async_block_till_done()
+    assert state_of(hass, entity_id) == STATE_ON
+    assert streams.auto_stream_on_motion(SYNTHETIC.camera_sn) is True
+
+    await set_switch(hass, entity_id, False)
+    await hass.async_block_till_done()
+    assert state_of(hass, entity_id) == STATE_OFF
+    assert streams.auto_stream_on_motion(SYNTHETIC.camera_sn) is False
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()

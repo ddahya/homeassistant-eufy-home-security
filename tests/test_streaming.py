@@ -69,19 +69,26 @@ from homeassistant.components.number import ATTR_VALUE, SERVICE_SET_VALUE
 from homeassistant.components.number import DOMAIN as NUMBER_DOMAIN
 from homeassistant.components.select import ATTR_OPTION, SERVICE_SELECT_OPTION
 from homeassistant.components.select import DOMAIN as SELECT_DOMAIN
+from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import ATTR_ENTITY_ID
+from homeassistant.const import ATTR_ENTITY_ID, SERVICE_TURN_ON
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.eufy_home_security import detections, streaming
 from custom_components.eufy_home_security.const import (
+    AUTO_STREAM_ON_MOTION_KEY,
+    AUTO_STREAM_TIMEOUT_SECONDS,
     CAMERA_KEY,
     CAPTURE_LIVE_IMAGE_KEY,
     CONF_LIVE_SNAPSHOT,
     CONF_STATION_SESSIONS,
+    DOMAIN,
+    SERVICE_START_LIVESTREAM,
+    SERVICE_STOP_LIVESTREAM,
 )
 
 # A second camera on the fake station, on channel 1: synthetic, like SENSOR_SN.
@@ -1528,4 +1535,73 @@ async def test_a_camera_the_homebase_cannot_wake_answers_503_and_is_not_asked_ag
 
     first.close()
     second.close()
+    await _unload(hass, entry)
+
+
+# ── programmatic live streaming and auto-stream on motion ─────────────────────
+
+
+async def test_camera_turn_on_and_turn_off_control_the_live_stream(
+    hass: HomeAssistant,
+    fake_station: FakeStation,
+    built_clients: list[EufySecurity],
+    seed_warm_cache: Callable[..., None],
+) -> None:
+    """``camera.turn_on`` / ``start_livestream`` opens the stream; ``turn_off`` stops it."""
+    del built_clients
+    entry = await set_up_warm(hass, seed_warm_cache)
+    entity_id = _camera_id(hass)
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_START_LIVESTREAM,
+        {ATTR_ENTITY_ID: entity_id},
+        blocking=True,
+    )
+    await wait_until(lambda: fake_station.streaming, timeout=20)
+    assert state_of(hass, entity_id) == CameraState.STREAMING
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_STOP_LIVESTREAM,
+        {ATTR_ENTITY_ID: entity_id},
+        blocking=True,
+    )
+    await wait_until(lambda: not fake_station.streaming, timeout=10)
+    assert state_of(hass, entity_id) == CameraState.IDLE
+
+    await _unload(hass, entry)
+
+
+async def test_auto_stream_on_motion_starts_stream_on_detection_and_times_out(
+    hass: HomeAssistant,
+    fake_station: FakeStation,
+    built_clients: list[EufySecurity],
+    seed_warm_cache: Callable[..., None],
+) -> None:
+    """With the auto-stream switch on, a detection push opens the stream and stops after 120s."""
+    del built_clients
+    entry = await set_up_warm(hass, seed_warm_cache)
+    camera_id = _camera_id(hass)
+    switch_id = entity_id_for(hass, SWITCH_DOMAIN, SYNTHETIC.camera_sn, AUTO_STREAM_ON_MOTION_KEY)
+
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: switch_id},
+        blocking=True,
+    )
+
+    entry.runtime_data.router.handle(detection_event(DetectionType.MOTION, t_ms=now_ms()))
+    await wait_until(lambda: fake_station.streaming, timeout=20)
+    assert state_of(hass, camera_id) == CameraState.STREAMING
+
+    async_fire_time_changed(
+        hass,
+        dt_util.utcnow() + timedelta(seconds=AUTO_STREAM_TIMEOUT_SECONDS + 1),
+    )
+    await hass.async_block_till_done()
+    await wait_until(lambda: not fake_station.streaming, timeout=10)
+    assert state_of(hass, camera_id) == CameraState.IDLE
+
     await _unload(hass, entry)

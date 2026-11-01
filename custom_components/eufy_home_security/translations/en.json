@@ -525,7 +525,11 @@
         "name": "Siren"
       }
     },
-    "switch": {},
+    "switch": {
+      "auto_stream_on_motion": {
+        "name": "Auto stream on motion"
+      }
+    },
     "binary_sensor": {
       "motion_detected": {
         "name": "Motion"
@@ -746,6 +750,14 @@
     "stop_recording": {
       "name": "Stop recording",
       "description": "Ends the clip the camera is recording now. The part recorded so far is saved in the event history as a complete clip, and the Record clip action returns."
+    },
+    "start_livestream": {
+      "name": "Start live stream",
+      "description": "Starts the P2P live stream for the camera."
+    },
+    "stop_livestream": {
+      "name": "Stop live stream",
+      "description": "Stops the active P2P live stream for the camera."
     }
   }
 }

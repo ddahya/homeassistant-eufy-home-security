@@ -350,11 +350,23 @@ class StreamManager:
         self._live_zooms: dict[str, float] = {}
         # Cameras whose live view is opening: their zoom reports are the camera's reset.
         self._opening: set[str] = set()
+        # Programmatic stream hold tasks and auto-stream configuration by serial.
+        self._programmatic_tasks: dict[str, asyncio.Task[None]] = {}
+        self._auto_stream_on_motion: dict[str, bool] = {}
         self._stopped = False
         _LOGGER.debug(
             "Stream manager started: a camera opens only when a viewer connects, and "
             "its audio is carried whenever it sends any"
         )
+
+    def auto_stream_on_motion(self, device_sn: str) -> bool:
+        """Whether auto-stream on motion is enabled for ``device_sn``."""
+        return self._auto_stream_on_motion.get(device_sn, False)
+
+    @callback
+    def set_auto_stream_on_motion(self, device_sn: str, enabled: bool) -> None:
+        """Set the auto-stream on motion preference for ``device_sn``."""
+        self._auto_stream_on_motion[device_sn] = enabled
 
     @callback
     def async_add_camera(self, station: Station, device_sn: str) -> None:
@@ -592,6 +604,70 @@ class StreamManager:
         """
         await self._async_abort(device_sn, "a setting changed the picture the camera sends")
 
+    async def async_start_stream(self, device_sn: str) -> None:
+        """Programmatically start and maintain a live stream for ``device_sn``."""
+        if self._stopped or device_sn not in self._serials:
+            return
+        existing = self._programmatic_tasks.get(device_sn)
+        if existing is not None and not existing.done():
+            return
+        broadcast = self.broadcast(device_sn)
+        if broadcast is None:
+            return
+
+        task = self._entry.async_create_background_task(
+            self._hass,
+            self._async_hold_stream(device_sn, broadcast),
+            name=f"{DOMAIN} programmatic stream {redact_serial(device_sn)}",
+        )
+        self._programmatic_tasks[device_sn] = task
+
+    async def _async_hold_stream(self, device_sn: str, broadcast: StreamBroadcast) -> None:
+        """Hold a subscription to keep the broadcast active and pump data."""
+        serial = redact_serial(device_sn)
+        _LOGGER.debug("Programmatic live stream hold started for %s", serial)
+        watched = False
+        try:
+            async with contextlib.aclosing(broadcast.subscribe()) as stream:
+                first = await anext(stream, None)
+                if first is None:
+                    error = broadcast.error
+                    _LOGGER.debug(
+                        "Programmatic live stream for %s received no data: %s",
+                        serial,
+                        "clean end" if error is None else errors.failure_reason(error),
+                    )
+                    async_dispatcher_send(self._hass, streaming_signal(device_sn))
+                    return
+                self._registry.watch(device_sn, 1)
+                watched = True
+                async for _ in stream:
+                    pass
+        except asyncio.CancelledError:
+            _LOGGER.debug("Programmatic live stream hold cancelled for %s", serial)
+            raise
+        except EufySecurityError as err:
+            _LOGGER.debug(
+                "Programmatic live stream for %s failed: %s",
+                serial,
+                errors.failure_reason(err),
+            )
+            if not watched:
+                async_dispatcher_send(self._hass, streaming_signal(device_sn))
+        finally:
+            if watched:
+                self._registry.watch(device_sn, -1)
+            self._programmatic_tasks.pop(device_sn, None)
+
+    async def async_stop_stream(self, device_sn: str) -> None:
+        """Stop the programmatic stream hold and abort any running broadcast."""
+        task = self._programmatic_tasks.pop(device_sn, None)
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await self._async_abort(device_sn, "turn off requested")
+
     async def _async_abort(self, device_sn: str, reason: str) -> None:
         """Close ``device_sn``'s broadcast if it is running, never raising.
 
@@ -629,6 +705,10 @@ class StreamManager:
         after unload a clean 404 rather than a stale broadcast.
         """
         self._stopped = True
+        for task in list(self._programmatic_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self._programmatic_tasks.clear()
         running = sum(
             1
             for device_sn in self._serials
@@ -636,7 +716,7 @@ class StreamManager:
             and broadcast.running
         )
         _LOGGER.debug("Stream manager stopping: %d live stream(s) running", running)
-        for device_sn in self._serials:
+        for device_sn in list(self._serials):
             broadcast = self._registry.broadcasts.pop(device_sn, None)
             if broadcast is None:
                 continue

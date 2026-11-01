@@ -43,6 +43,7 @@ live_buttons:                    # optional: buttons on the live view bar (lock,
   - lock.front_door
 live_seconds: 120                # optional: length of a started live view (default 120 s)
 auto_live: timed                 # optional: start live view when the dashboard opens: timed | continuous (true = timed)
+live_on_motion: true             # optional: switch to live view while the camera entity's state is streaming (default true)
 history_folder: Front_door       # optional: the camera's history folder, when it differs from the device name
 layout: auto                     # optional: auto | compact | regular
 settings_include:                # optional: more of the camera's entities in Settings (entity ids)
@@ -57,6 +58,9 @@ settings_groups:                 # optional: Settings tabs to show, in this orde
 
 - `auto_live` wakes the camera every time the card is shown (dashboard opened, view entered, tab shown again),
   so it costs battery. Stop holds until the next showing.
+- `live_on_motion` (default `true`) switches the card to live view whenever the camera entity's state is
+  `streaming` (for example from **Auto-Stream on Motion** or `eufy_home_security.start_livestream`) and returns
+  to the still when the stream ends. Pressing Stop returns to the still for the rest of that stream.
 - `layout: auto` switches to the compact layout (one column of settings rows) below 400 px card width.
 - `history_folder` is needed only when the camera was renamed after its files were saved.
 - Colours come from the HA theme, light or dark: tabs, switches, sliders and fields use HA's own control

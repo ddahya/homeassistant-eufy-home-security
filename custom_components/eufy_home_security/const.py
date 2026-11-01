@@ -558,3 +558,11 @@ ATTR_VALUE_SOURCE: Final = "value_source"
 # is ended so the next open starts at the new size (an MPEG-TS stream cannot carry a
 # size change).
 PICTURE_CHANGING_SETTINGS: Final = frozenset({"live_streaming_resolution"})
+
+# Auto-stream on motion toggle switch and quiet timeout before closing the stream.
+AUTO_STREAM_ON_MOTION_KEY: Final = "auto_stream_on_motion"
+AUTO_STREAM_TIMEOUT_SECONDS: Final = 120
+
+# Camera actions to start and stop the P2P live stream programmatically.
+SERVICE_START_LIVESTREAM: Final = "start_livestream"
+SERVICE_STOP_LIVESTREAM: Final = "stop_livestream"

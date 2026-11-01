@@ -7,6 +7,9 @@ the library reads the mask fresh and moves only that bit.
 ``EufyFlagSwitch`` turns one member of a ``FLAGS`` setting (``detection_type_set``:
 human, vehicle, pet, other motion) on or off with ``Station.async_set_flag``, which
 reads the mask fresh and keeps every other bit.
+
+``EufyAutoStreamOnMotionSwitch`` toggles automatic P2P live streaming whenever a
+motion or detection event occurs on the camera.
 """
 
 from __future__ import annotations
@@ -14,12 +17,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, override
 
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.const import Platform
+from homeassistant.const import STATE_ON, EntityCategory, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 
+from . import detections, runtime
+from .const import AUTO_STREAM_ON_MOTION_KEY
 from .coordinator import StationCoordinator
-from .entity import EufySettingEntity
+from .entity import EufyDeviceEntity, EufyPushAvailability, EufySettingEntity
 from .settings import SettingEntitySpec, setting_specs
 
 if TYPE_CHECKING:
@@ -34,7 +40,7 @@ async def async_setup_entry(
     entry: EufyConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Add every writable on/off setting and one switch per flags member."""
+    """Add every writable on/off setting, one switch per flags member, and auto-stream switches."""
     del hass  # the coordinators carry everything this platform needs
     entities: list[SwitchEntity] = []
     for coordinator in entry.runtime_data.coordinators.values():
@@ -45,6 +51,16 @@ async def async_setup_entry(
                 entities.append(EufyFlagSwitch(coordinator, spec))
             else:
                 entities.append(EufySettingSwitch(coordinator, spec))
+
+    streams = runtime.streaming(entry)
+    if streams is not None:
+        for coordinator in entry.runtime_data.coordinators.values():
+            for device_sn, kind in detections.paired_device_kinds(coordinator.station).items():
+                if detections.has_detection_entities(kind) and detections.has_live_stream(
+                    coordinator.station, device_sn
+                ):
+                    entities.append(EufyAutoStreamOnMotionSwitch(coordinator, device_sn))
+
     async_add_entities(entities)
 
 
@@ -100,3 +116,48 @@ class EufyFlagSwitch(EufySettingEntity, SwitchEntity):
         """Clear this member; every other bit stays as the station has it."""
         del kwargs  # a setting switch takes no service parameters
         await self.async_write_flag(False)
+
+
+class EufyAutoStreamOnMotionSwitch(
+    EufyPushAvailability, EufyDeviceEntity, SwitchEntity, RestoreEntity
+):
+    """Switch to toggle automatic P2P live streaming on motion events."""
+
+    _attr_translation_key = AUTO_STREAM_ON_MOTION_KEY
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: StationCoordinator, device_sn: str) -> None:
+        super().__init__(coordinator, device_sn, AUTO_STREAM_ON_MOTION_KEY)
+        self._serial = device_sn
+        self._attr_is_on = False
+
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Restore previous state and update stream manager."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is not None:
+            self._attr_is_on = last.state == STATE_ON
+        streams = runtime.streaming(self.coordinator.config_entry)
+        if streams is not None:
+            streams.set_auto_stream_on_motion(self._serial, bool(self._attr_is_on))
+
+    @override
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn auto-stream on motion on."""
+        del kwargs
+        self._attr_is_on = True
+        streams = runtime.streaming(self.coordinator.config_entry)
+        if streams is not None:
+            streams.set_auto_stream_on_motion(self._serial, True)
+        self.async_write_ha_state()
+
+    @override
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn auto-stream on motion off."""
+        del kwargs
+        self._attr_is_on = False
+        streams = runtime.streaming(self.coordinator.config_entry)
+        if streams is not None:
+            streams.set_auto_stream_on_motion(self._serial, False)
+        self.async_write_ha_state()

@@ -123,3 +123,15 @@ stop_recording:
     entity:
       integration: eufy_home_security
       domain: camera
+
+start_livestream:
+  target:
+    entity:
+      integration: eufy_home_security
+      domain: camera
+
+stop_livestream:
+  target:
+    entity:
+      integration: eufy_home_security
+      domain: camera

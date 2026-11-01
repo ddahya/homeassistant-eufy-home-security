@@ -44,15 +44,23 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, override
 
 import probatio as vol
 from homeassistant.components.camera import Camera, CameraEntityFeature
-from homeassistant.core import HomeAssistant, ServiceResponse, SupportsResponse, callback
+from homeassistant.core import (
+    CALLBACK_TYPE,
+    HomeAssistant,
+    ServiceResponse,
+    SupportsResponse,
+    callback,
+)
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 
 from eufy_home_security import (
     MAX_ZOOM,
@@ -62,6 +70,7 @@ from eufy_home_security import (
     EufySecurityError,
     MediaClip,
     PanTilt,
+    SecurityEvent,
     redact_serial,
 )
 
@@ -85,11 +94,13 @@ from .const import (
     ATTR_MEDIA_CONTENT_ID,
     ATTR_PRESET,
     ATTR_VIDEO_CODEC,
+    AUTO_STREAM_TIMEOUT_SECONDS,
     CAMERA_FRAME_INTERVAL_SECONDS,
     CAMERA_KEY,
     CLIP_REMUX_TIMEOUT_SECONDS,
     CONF_RECORD_LENGTH,
     DEFAULT_RECORD_LENGTH_SECONDS,
+    DOMAIN,
     MAX_RECORD_LENGTH_SECONDS,
     MIN_RECORD_LENGTH_SECONDS,
     PRESET_MAX_INDEX,
@@ -99,6 +110,8 @@ from .const import (
     SERVICE_PAN_TILT,
     SERVICE_RECORD,
     SERVICE_SAVE_PRESET,
+    SERVICE_START_LIVESTREAM,
+    SERVICE_STOP_LIVESTREAM,
     SERVICE_STOP_RECORDING,
     SERVICE_ZOOM,
     ZOOM_ACTION_STEP,
@@ -192,6 +205,8 @@ async def async_setup_entry(
         supports_response=SupportsResponse.OPTIONAL,
     )
     platform.async_register_entity_service(SERVICE_STOP_RECORDING, None, "async_stop_recording")
+    platform.async_register_entity_service(SERVICE_START_LIVESTREAM, None, "async_turn_on")
+    platform.async_register_entity_service(SERVICE_STOP_LIVESTREAM, None, "async_turn_off")
 
 
 # A slot index as every preset action takes it.
@@ -235,11 +250,13 @@ class EufyCamera(EufyPushAvailability, EufyDeviceEntity, small_images.SmallImage
         self._presets = presets
         # Set by stop_recording: ends the running record action's capture.
         self._record_stop: asyncio.Event | None = None
+        # Auto-stop timer callback for automatic streaming on motion.
+        self._auto_stop_timer: CALLBACK_TYPE | None = None
         # Per instance, never at class scope: only a camera the library can open live
         # on its station advertises a stream, so Home Assistant never offers a live
         # view the library would refuse to open.
         if detections.has_live_stream(coordinator.station, device_sn):
-            self._attr_supported_features = CameraEntityFeature.STREAM
+            self._attr_supported_features = CameraEntityFeature.STREAM | CameraEntityFeature.ON_OFF
 
     @override
     async def stream_source(self) -> str | None:
@@ -408,7 +425,7 @@ class EufyCamera(EufyPushAvailability, EufyDeviceEntity, small_images.SmallImage
 
     @override
     async def async_added_to_hass(self) -> None:
-        """Follow this camera's image changes and live viewers until the entity is removed."""
+        """Follow this camera's image changes, live viewers, and push events until removed."""
         await super().async_added_to_hass()
         self.async_on_remove(
             async_dispatcher_connect(
@@ -423,6 +440,84 @@ class EufyCamera(EufyPushAvailability, EufyDeviceEntity, small_images.SmallImage
                 self.hass, streaming.streaming_signal(self._serial), self._async_on_streaming
             )
         )
+        self.async_on_remove(self._cancel_auto_stop_timer)
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                detections.device_signal(self.coordinator.config_entry.entry_id, self._serial),
+                self._async_on_device_event,
+            )
+        )
+
+    @callback
+    def _async_on_device_event(self, event: SecurityEvent) -> None:
+        """Handle device push events for auto-stream on motion."""
+        if detections.detection_event_type(event) is None:
+            return
+        streams = runtime.streaming(self.coordinator.config_entry)
+        if streams is None or not streams.auto_stream_on_motion(self._serial):
+            return
+
+        if not self.is_streaming:
+            self._reset_auto_stop_timer()
+            self.coordinator.config_entry.async_create_background_task(
+                self.hass,
+                self.async_turn_on(),
+                name=f"{DOMAIN} auto-stream on motion {redact_serial(self._serial)}",
+            )
+        elif self._auto_stop_timer is not None:
+            self._reset_auto_stop_timer()
+
+    @callback
+    def _reset_auto_stop_timer(self) -> None:
+        """Arm or reset the auto-stop timer."""
+        self._cancel_auto_stop_timer()
+        self._auto_stop_timer = async_call_later(
+            self.hass,
+            AUTO_STREAM_TIMEOUT_SECONDS,
+            self._async_auto_stop_timer_expired,
+        )
+
+    @callback
+    def _cancel_auto_stop_timer(self) -> None:
+        """Cancel the auto-stop timer if running."""
+        if self._auto_stop_timer is not None:
+            self._auto_stop_timer()
+            self._auto_stop_timer = None
+
+    @callback
+    def _async_auto_stop_timer_expired(self, _now: datetime) -> None:
+        """Automatically turn off camera stream after motion quiet timeout."""
+        self._auto_stop_timer = None
+        self.coordinator.config_entry.async_create_background_task(
+            self.hass,
+            self.async_turn_off(),
+            name=f"{DOMAIN} auto-stop live stream {redact_serial(self._serial)}",
+        )
+
+    @override
+    async def async_turn_on(self) -> None:
+        """Start the camera's live stream."""
+        if not self.supported_features & CameraEntityFeature.ON_OFF:
+            return
+        streams = runtime.streaming(self.coordinator.config_entry)
+        if streams is None or not streams.has_camera(self._serial):
+            return
+        self._attr_is_streaming = True
+        self.async_write_ha_state()
+        await streams.async_start_stream(self._serial)
+
+    @override
+    async def async_turn_off(self) -> None:
+        """Stop the camera's live stream."""
+        if not self.supported_features & CameraEntityFeature.ON_OFF:
+            return
+        self._cancel_auto_stop_timer()
+        streams = runtime.streaming(self.coordinator.config_entry)
+        if streams is not None:
+            await streams.async_stop_stream(self._serial)
+        self._attr_is_streaming = False
+        self.async_write_ha_state()
 
     @callback
     def _async_on_streaming(self) -> None:

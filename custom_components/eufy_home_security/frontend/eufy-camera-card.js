@@ -305,6 +305,8 @@ class EufyCameraCard extends HTMLElement {
     this._pending = {};
     this._keys = {};
     this._live = null; // { continuous, until, started, video, muted }
+    this._liveFromState = false; // true when started automatically because camera state is streaming
+    this._userStopped = false;   // true when user clicked Stop button; resets when camera state is not streaming
     this._busy = {};   // zoom calls in flight, by key
     this._moves = [];  // pan/tilt/go-to presses, the first one running: [{ key, service, data }]
     this._imgs = new Map(); // picture URL -> 'loading' | 'ok' | 'err'
@@ -371,6 +373,8 @@ class EufyCameraCard extends HTMLElement {
   // of the previous camera ends)
   _useCam(id) {
     this._stop('');
+    this._liveFromState = false;
+    this._userStopped = false;
     this._gen += 1;
     // a station-list or history answer still on its way belongs to the previous camera
     this._sseq = (this._sseq || 0) + 1;
@@ -469,6 +473,23 @@ class EufyCameraCard extends HTMLElement {
       const st = hass.states[this._config.entity];
       if (st && this._stream.stateObj !== st) this._stream.stateObj = st;
       this._stream.hass = hass;
+    }
+    // Automatically follow the camera's streaming state (from Auto Stream on Motion or camera.turn_on)
+    const prevSt = prev && this._config && prev.states[this._config.entity];
+    const newSt = hass && this._config && hass.states[this._config.entity];
+    if (prevSt && newSt && prevSt.state !== newSt.state) {
+      if (newSt.state === 'streaming') {
+        if (!this._live && !this._userStopped && this._canLive(newSt) && this._liveOnMotion()) {
+          this._liveFromState = true;
+          this._start(false);
+        }
+      } else if (prevSt.state === 'streaming') {
+        this._userStopped = false;
+        if (this._live && this._liveFromState) {
+          this._liveFromState = false;
+          this._stop('');
+        }
+      }
     }
     if (prev && this._open === 'history') {
       const a = prev.states[this._config.entity], b = hass.states[this._config.entity];
@@ -1056,6 +1077,8 @@ class EufyCameraCard extends HTMLElement {
   // Whether the camera offers a live stream (CameraEntityFeature.STREAM): only then live view and record
   _canLive(st) { return !!st && ((st.attributes.supported_features || 0) & 2) === 2; }
 
+  _liveOnMotion() { return !this._config || this._config.live_on_motion !== false; }
+
   // `auto_live`: true | 'timed' (a timed view) or 'continuous', started when the card is shown
   _autoMode() {
     const a = this._config && this._config.auto_live;
@@ -1066,10 +1089,19 @@ class EufyCameraCard extends HTMLElement {
   // Once per showing: the card is on screen in a visible tab, not an editor preview, and the camera is available
   _autoTry() {
     const mode = this._autoMode();
-    if (!mode || this._autoDone || this._live || !this.isConnected || this.preview || !this._hass || !this.content) return;
+    if (this._live || !this.isConnected || this.preview || !this._hass || !this.content) return;
     if (document.visibilityState !== 'visible') return;
     const st = this._st(this._config.entity);
     if (!st || st.state === 'unavailable' || !this._canLive(st)) return;
+
+    // Automatically follow an active live stream on the camera
+    if (st.state === 'streaming' && !this._userStopped && this._liveOnMotion()) {
+      this._liveFromState = true;
+      this._start(false);
+      return;
+    }
+
+    if (!mode || this._autoDone) return;
     this._autoDone = true;
     this._start(mode === 'continuous');
   }
@@ -1166,6 +1198,13 @@ class EufyCameraCard extends HTMLElement {
     clearInterval(this._tickT);
     this._tickT = null;
     if (this._stream) { this._stream.remove(); this._stream = null; }
+    if (this._liveFromState) {
+      this._liveFromState = false;
+      const st = this._st(this._config.entity);
+      if (this._hass && st && st.state === 'streaming') {
+        this._hass.callService('camera', 'turn_off', { entity_id: this._config.entity }).catch(() => {});
+      }
+    }
     this._live = null;
     this._moves = this._moves.slice(0, 1);
     this._atPreset = null;
@@ -1511,12 +1550,28 @@ class EufyCameraCard extends HTMLElement {
         this._focus(this._live ? 'live-rec' : 'play');
         return;
       }
-      if (v === 'stop') this._stop('');
+      if (v === 'stop') {
+        this._userStopped = true;
+        this._liveFromState = false;
+        this._stop('');
+        const st = this._st(this._config.entity);
+        if (this._hass && st && st.state === 'streaming') {
+          this._hass.callService('camera', 'turn_off', { entity_id: this._config.entity }).catch(() => {});
+        }
+      }
       else if (v === 'mute') { if (this._live) { this._live.muted = !this._live.muted; this._applyMute(); this.render(); } }
       else if (v === 'full') { if (this._menuOpen) this._setMenu(false); this._fullscreen(); this._focus('live-full'); return; }
       else if (v === 'presets') { this._preOpen = !this._preOpen; this.render(); this._focus(this._preOpen ? `lp-${this._firstPreset()}` : 'live-presets'); return; }
-      else if (v === 'pin') this._start(!(this._live && this._live.continuous));
-      else this._start(v === 'continuous');
+      else if (v === 'pin') {
+        this._userStopped = false;
+        this._liveFromState = false;
+        this._start(!(this._live && this._live.continuous));
+      }
+      else {
+        this._userStopped = false;
+        this._liveFromState = false;
+        this._start(v === 'continuous');
+      }
       if (this._menuOpen) this._setMenu(false);
       this._focus(v === 'stop' || !this._live ? 'play' : `live-${v}`);
       return;
@@ -3585,6 +3640,7 @@ const EDITOR_SCHEMA = [
   { name: 'show_header', selector: { boolean: {} } },
   { name: 'show_history', selector: { boolean: {} } },
   { name: 'show_settings', selector: { boolean: {} } },
+  { name: 'live_on_motion', selector: { boolean: {} } },
   { name: 'auto_live', selector: { select: { mode: 'dropdown', options: [
     { value: 'off', label: 'Off: start by hand' }, { value: 'timed', label: 'Timed live view' }, { value: 'continuous', label: 'Continuous live view' }] } } },
   { name: 'live_seconds', selector: { number: { min: 30, max: 900, step: 10, mode: 'box', unit_of_measurement: 's' } } },
@@ -3594,7 +3650,7 @@ const EDITOR_SCHEMA = [
     { value: 'auto', label: 'Auto (compact below 400 px)' }, { value: 'compact', label: 'Compact' }, { value: 'regular', label: 'Regular' }] } } },
 ];
 const EDITOR_LABELS = { entity: 'Camera', entities: 'More cameras', picture: 'Picture shape', show_header: 'Header',
-  show_history: 'History', show_settings: 'Settings', live_buttons: 'Live view buttons', name: 'Name', history_folder: 'History folder', auto_live: 'Start live view when the dashboard opens', live_seconds: 'Live view length', layout: 'Layout',
+  show_history: 'History', show_settings: 'Settings', live_on_motion: 'Show live stream on motion', live_buttons: 'Live view buttons', name: 'Name', history_folder: 'History folder', auto_live: 'Start live view when the dashboard opens', live_seconds: 'Live view length', layout: 'Layout',
   settings_include: 'Settings to add', settings_exclude: 'Hidden settings', settings_groups: 'Settings tabs' };
 // Settings tabs as HA's reorderable multi-select: a chip per shown tab (drag to reorder, ✕ to hide), the rest to add.
 // Options: the camera's layout sections, More, and any listed id the layout lacks (kept, never dropped from the list).
@@ -3612,6 +3668,7 @@ const EDITOR_HELPERS = {
   live_buttons: 'Buttons on the live view bar, e.g. a door lock (Open or Unlock) for a doorbell, a gate, a script; each needs a second press within 4 s',
   history_folder: 'The camera\'s folder under Media › eufy_home_security; only when the camera was renamed after its stills were saved',
   auto_live: 'Wakes the camera on every opening: costs battery',
+  live_on_motion: 'When the camera begins streaming on motion, automatically switch this card from the still image to live video',
   settings_include: 'Settings shows the camera\'s settings by section; entities named here join them (a guard-mode action or delay under Modes, an entity in no section under More)',
   settings_exclude: 'Controls of the camera to leave out of Settings',
   settings_groups: 'Tabs in Settings, in this order: drag to reorder, remove a tab to hide it with its settings. While this list differs from the default, a section the integration adds later stays hidden; removing every tab shows them all again',
@@ -3661,6 +3718,7 @@ class EufyCameraCardEditor extends HTMLElement {
     const d = { ...(this._config || {}) };
     if (d.auto_live === true) d.auto_live = 'timed';
     ['header', 'history', 'settings'].forEach((k) => { if (d[`show_${k}`] === undefined) d[`show_${k}`] = true; });
+    if (d.live_on_motion === undefined) d.live_on_motion = true;
     if (!PICTURE_MODES.includes(d.picture)) d.picture = 'auto';
     const secs = this._lay && this._lay.secs;
     const v = d.settings_groups;
@@ -3689,7 +3747,7 @@ class EufyCameraCardEditor extends HTMLElement {
             if (!list.length || list.join() === shownTabs(null, secs).join()) delete next[k]; else next[k] = list;
             return;
           }
-          if (v === '' || v === undefined || v === null || (Array.isArray(v) && !v.length) || (k === 'layout' && v === 'auto') || (k === 'picture' && v === 'auto') || (/^show_/.test(k) && v === true) || (k === 'auto_live' && v === 'off') || (k === 'live_seconds' && v === LIVE_S)) delete next[k]; else next[k] = v;
+          if (v === '' || v === undefined || v === null || (Array.isArray(v) && !v.length) || (k === 'layout' && v === 'auto') || (k === 'picture' && v === 'auto') || (/^show_/.test(k) && v === true) || (k === 'live_on_motion' && v === true) || (k === 'auto_live' && v === 'off') || (k === 'live_seconds' && v === LIVE_S)) delete next[k]; else next[k] = v;
         });
         this._config = next;
         this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: next }, bubbles: true, composed: true }));

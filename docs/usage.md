@@ -267,6 +267,11 @@ the event history:
 - Changing **Streaming quality** (`live_streaming_resolution`) ends a running view.
 - The camera entity's state is `streaming` from a view's first picture until the last
   viewer leaves (`recording` while it records a clip), else `idle`.
+- **Auto-Stream on Motion** switch (`switch.<camera>_auto_stream_on_motion`, default off):
+  when on, a motion, person, pet, vehicle, sound, or crying push starts the live stream and
+  holds it open until 120 s after the last detection.
+- `eufy_home_security.start_livestream` / `eufy_home_security.stop_livestream` (or
+  `camera.turn_on` / `camera.turn_off`) start or stop the live stream from an automation.
 
 Browser support: [network.md](network.md#browsers). Adding devices:
 [devices.md](devices.md#adding-a-device).

@@ -120,6 +120,11 @@
           "on": "mdi:alarm-light"
         }
       }
+    },
+    "switch": {
+      "auto_stream_on_motion": {
+        "default": "mdi:motion-sensor-sync"
+      }
     }
   },
   "services": {
@@ -146,6 +151,12 @@
     },
     "stop_recording": {
       "service": "mdi:stop-circle-outline"
+    },
+    "start_livestream": {
+      "service": "mdi:play-circle"
+    },
+    "stop_livestream": {
+      "service": "mdi:stop-circle"
     }
   }
 }
