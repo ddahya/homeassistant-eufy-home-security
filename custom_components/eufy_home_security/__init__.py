@@ -36,6 +36,9 @@ import eufy_home_security.p2p.session as _p2p_session
 # HomeBase 3 takes 6-9s to relay PTZ commands over Wi-Fi to bridged cameras (e.g. T8425);
 # raise COMMAND_TIMEOUT from 6.0s to 15.0s so commands do not falsely time out before ACK.
 _p2p_session.COMMAND_TIMEOUT = 15.0
+# During PTZ movements on bridged cameras, video frames pause for 4-10s while the motor steps;
+# raise MEDIA_IDLE_TIMEOUT from 3.0s to 15.0s so the live stream does not hit EOF during a pan/tilt.
+_p2p_session.MEDIA_IDLE_TIMEOUT = 15.0
 
 
 async def _patched_ptz_recipe(self: Station, recipe: Any, channel: int) -> Any:
@@ -206,6 +209,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EufyConfigEntry) -> bool
     login cached, and a warm cache performs no cloud round trip at all.
     """
     _p2p_session.COMMAND_TIMEOUT = 15.0
+    _p2p_session.MEDIA_IDLE_TIMEOUT = 15.0
     Station._ptz_recipe = _patched_ptz_recipe
     Station._ptz_recipe_patched = True
     # Each attempt re-evaluates the stations' stamps and keys: an attempt that raised
