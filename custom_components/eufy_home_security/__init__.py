@@ -33,23 +33,32 @@ from eufy_home_security import (
 )
 import eufy_home_security.p2p.session as _p2p_session
 
-# HomeBase 3 takes 6-9s to relay PTZ commands over Wi-Fi to bridged cameras (e.g. T8425);
-# raise COMMAND_TIMEOUT from 6.0s to 15.0s so commands do not falsely time out before ACK.
-_p2p_session.COMMAND_TIMEOUT = 15.0
-# During PTZ movements on bridged cameras, video frames pause for 4-10s while the motor steps;
-# raise MEDIA_IDLE_TIMEOUT from 3.0s to 15.0s so the live stream does not hit EOF during a pan/tilt.
-_p2p_session.MEDIA_IDLE_TIMEOUT = 15.0
+# HomeBase 3 takes 6-15s to relay PTZ commands over Wi-Fi to bridged cameras (e.g. T8425);
+# raise COMMAND_TIMEOUT from 6.0s to 30.0s so commands do not falsely time out before ACK.
+_p2p_session.COMMAND_TIMEOUT = 30.0
+# During PTZ movements on bridged cameras, video frames pause for 4-14s while the motor steps;
+# raise MEDIA_IDLE_TIMEOUT from 3.0s to 30.0s so the live stream does not hit EOF during a pan/tilt.
+_p2p_session.MEDIA_IDLE_TIMEOUT = 30.0
 
 
 async def _patched_ptz_recipe(self: Station, recipe: Any, channel: int) -> Any:
-    """Run a preset/pan-tilt recipe with 15s timeout for HomeBase 3 bridged cameras."""
+    """Run a preset/pan-tilt recipe with 30s timeout and code -108 retry for HomeBase 3."""
     for attempt in range(4):
         try:
-            return await self.session.async_run_recipe(recipe, channel=channel, timeout=15.0)
-        except CommandRejectedError as err:
-            if err.code != 1 or attempt + 1 == 4:
+            return await self.session.async_run_recipe(recipe, channel=channel, timeout=30.0)
+        except (CommandRejectedError, CommandUnsupportedError) as err:
+            # Code 1 is camera moving/busy; code -108 is station channel busy during media
+            if isinstance(err, CommandRejectedError) and err.code != 1:
                 raise
-            await asyncio.sleep(3.0)
+            if attempt + 1 == 4:
+                raise
+            _LOGGER.debug(
+                "PTZ recipe %s busy/unsupported (code %s), retrying in 2s (attempt %d/4)",
+                getattr(recipe, "identifier", recipe),
+                getattr(err, "code", err),
+                attempt + 1,
+            )
+            await asyncio.sleep(2.0)
     raise AssertionError("unreachable")
 
 
@@ -208,8 +217,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: EufyConfigEntry) -> bool
     The password is ``None``: the library logs in with the one the config flow's
     login cached, and a warm cache performs no cloud round trip at all.
     """
-    _p2p_session.COMMAND_TIMEOUT = 15.0
-    _p2p_session.MEDIA_IDLE_TIMEOUT = 15.0
+    _p2p_session.COMMAND_TIMEOUT = 30.0
+    _p2p_session.MEDIA_IDLE_TIMEOUT = 30.0
     Station._ptz_recipe = _patched_ptz_recipe
     Station._ptz_recipe_patched = True
     # Each attempt re-evaluates the stations' stamps and keys: an attempt that raised

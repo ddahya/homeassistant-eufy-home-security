@@ -537,7 +537,7 @@ class StreamManager:
     async def _async_open_zoomed(self, station: Station, device_sn: str) -> FrameStream:
         preset = self.live_preset(device_sn)
         stream = await station.async_open_live(
-            device_sn, preset=preset, wait=True, idle_timeout=15.0
+            device_sn, preset=preset, wait=True, idle_timeout=30.0
         )
         zoom = self._live_zooms.get(device_sn)
         if zoom is None or zoom == self._slot_zoom(device_sn, preset):
