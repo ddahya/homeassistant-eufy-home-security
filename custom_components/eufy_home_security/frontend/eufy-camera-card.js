@@ -485,7 +485,10 @@ class EufyCameraCard extends HTMLElement {
         }
       } else if (prevSt.state === 'streaming') {
         this._userStopped = false;
-        // Live view runs until its countdown timer reaches 0 or user clicks Stop
+        if (this._live && this._liveFromState) {
+          this._liveFromState = false;
+          this._stop('');
+        }
       }
     }
     if (prev && this._open === 'history') {
