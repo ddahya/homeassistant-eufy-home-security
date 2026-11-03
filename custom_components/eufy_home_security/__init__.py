@@ -20,6 +20,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from eufy_home_security import (
     AuthenticationError,
+    CommandRejectedError,
     EufySecurityError,
     LoginNeed,
     PtzAction,
@@ -30,6 +31,27 @@ from eufy_home_security import (
     entity_unique_id,
     redact_serial,
 )
+import eufy_home_security.p2p.session as _p2p_session
+
+# HomeBase 3 takes 6-9s to relay PTZ commands over Wi-Fi to bridged cameras (e.g. T8425);
+# raise COMMAND_TIMEOUT from 6.0s to 15.0s so commands do not falsely time out before ACK.
+_p2p_session.COMMAND_TIMEOUT = 15.0
+
+
+async def _patched_ptz_recipe(self: Station, recipe: Any, channel: int) -> Any:
+    """Run a preset/pan-tilt recipe with 15s timeout for HomeBase 3 bridged cameras."""
+    for attempt in range(4):
+        try:
+            return await self.session.async_run_recipe(recipe, channel=channel, timeout=15.0)
+        except CommandRejectedError as err:
+            if err.code != 1 or attempt + 1 == 4:
+                raise
+            await asyncio.sleep(3.0)
+    raise AssertionError("unreachable")
+
+
+Station._ptz_recipe = _patched_ptz_recipe
+Station._ptz_recipe_patched = True
 
 from . import (
     card,
@@ -183,6 +205,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: EufyConfigEntry) -> bool
     The password is ``None``: the library logs in with the one the config flow's
     login cached, and a warm cache performs no cloud round trip at all.
     """
+    _p2p_session.COMMAND_TIMEOUT = 15.0
+    Station._ptz_recipe = _patched_ptz_recipe
+    Station._ptz_recipe_patched = True
     # Each attempt re-evaluates the stations' stamps and keys: an attempt that raised
     # a mismatch or cipher issue and then failed was never unloaded.
     errors.delete_reload_scoped_issues(hass, entry)

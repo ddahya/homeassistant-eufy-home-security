@@ -32,6 +32,11 @@ from eufy_home_security import (
     UnsupportedError,
     redact_serial,
 )
+import eufy_home_security.p2p.session as _p2p_session
+
+# HomeBase 3 takes 6-9s to relay PTZ commands over Wi-Fi to bridged cameras (e.g. T8425);
+# raise COMMAND_TIMEOUT from 6.0s to 15.0s so commands do not falsely time out before ACK.
+_p2p_session.COMMAND_TIMEOUT = 15.0
 
 from . import errors, presets, runtime
 from .const import LIVE_ZOOM_KEY, SERVICE_DELETE_PRESET, SERVICE_SAVE_PRESET
